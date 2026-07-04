@@ -206,6 +206,9 @@ pub use items::*;
 pub use menu::*;
 pub use menu_id::MenuId;
 
+#[cfg(target_os = "macos")]
+pub use platform_impl::menu_extras;
+
 /// An enumeration of all available menu types, useful to match against
 /// the items returned from [`Menu::items`] or [`Submenu::items`]
 #[derive(Clone)]
