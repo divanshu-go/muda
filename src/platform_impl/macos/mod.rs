@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 mod accelerator;
+pub mod menu_extras;
 mod icon;
 mod util;
 
@@ -560,7 +561,7 @@ impl MenuChild {
         self.native_icon = None;
         for ns_items in self.ns_menu_items.values() {
             for ns_item in ns_items {
-                menuitem_set_icon(ns_item, icon.as_ref());
+                menuitem_set_icon(ns_item, icon.as_ref(), menu_extras::large_icon_height(&self.id.0));
             }
         }
     }
@@ -769,36 +770,43 @@ impl MenuChild {
 impl MenuChild {
     pub fn create_ns_item_for_submenu(
         &mut self,
+        owner: Rc<RefCell<MenuChild>>,
         menu_id: u32,
     ) -> crate::Result<Retained<NSMenuItem>> {
         let mtm = MainThreadMarker::new().expect("can only create menu item on the main thread");
-        let ns_menu_item;
+        let ns_menu_item = MenuItem::create(
+            mtm,
+            &self.text,
+            Some(sel!(fireMenuItemAction:)),
+            &self.key_accelerator,
+        )?;
+
+        let checked = menu_extras::checked_submenu(&self.id.0)
+            .unwrap_or_else(|| self.checked.get());
+        self.checked.set(checked);
+
         let ns_submenu;
-
-        let title = NSString::from_str(&self.text);
         unsafe {
-            ns_menu_item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &title,
-                None,
-                &NSString::new(),
-            );
-            ns_submenu = NSMenu::new(mtm);
-            ns_submenu.setTitle(&title);
-
-            ns_menu_item.setSubmenu(Some(&ns_submenu));
-            ns_submenu.setAutoenablesItems(false);
-
+            ns_menu_item.setTarget(Some(&ns_menu_item));
             ns_menu_item.setEnabled(self.enabled);
+            if checked {
+                ns_menu_item.setState(NSControlStateValueOn);
+            }
 
             if let Some(native_icon) = self.native_icon {
                 menuitem_set_native_icon(&ns_menu_item, Some(native_icon));
             }
-
             if let Some(icon) = self.icon.as_ref() {
-                menuitem_set_icon(&ns_menu_item, Some(icon));
+                menuitem_set_icon(&ns_menu_item, Some(icon), None);
             }
+
+            ns_submenu = NSMenu::new(mtm);
+            ns_submenu.setTitle(&NSString::from_str(&self.text));
+            ns_submenu.setAutoenablesItems(false);
+            ns_menu_item.setSubmenu(Some(&ns_submenu));
         }
+
+        ns_menu_item.ivars().replace(Some(owner));
 
         let id = COUNTER.next();
 
@@ -817,9 +825,9 @@ impl MenuChild {
         self.ns_menu_items
             .entry(menu_id)
             .or_default()
-            .push(ns_menu_item.retain());
+            .push(Retained::into_super(ns_menu_item.retain()));
 
-        Ok(ns_menu_item)
+        Ok(Retained::into_super(ns_menu_item))
     }
 
     pub fn create_ns_item_for_menu_item(
@@ -942,7 +950,8 @@ impl MenuChild {
             ns_menu_item.setEnabled(self.enabled);
 
             if self.icon.is_some() {
-                menuitem_set_icon(&ns_menu_item, self.icon.as_ref());
+                let height = menu_extras::large_icon_height(&self.id.0);
+                menuitem_set_icon(&ns_menu_item, self.icon.as_ref(), height);
             } else if self.native_icon.is_some() {
                 menuitem_set_native_icon(&ns_menu_item, self.native_icon);
             }
@@ -964,7 +973,7 @@ impl MenuChild {
         menu_id: u32,
     ) -> crate::Result<Retained<NSMenuItem>> {
         match self.item_type {
-            MenuItemType::Submenu => self.create_ns_item_for_submenu(menu_id),
+            MenuItemType::Submenu => self.create_ns_item_for_submenu(owner, menu_id),
             MenuItemType::MenuItem => self.create_ns_item_for_menu_item(owner, menu_id),
             MenuItemType::Predefined => {
                 self.create_ns_item_for_predefined_menu_item(owner, menu_id)
@@ -1005,7 +1014,10 @@ impl PredefinedMenuItemType {
 impl dyn IsMenuItem + '_ {
     fn make_ns_item_for_menu(&self, menu_id: u32) -> crate::Result<Retained<NSMenuItem>> {
         match self.kind() {
-            MenuItemKind::Submenu(i) => i.inner.borrow_mut().create_ns_item_for_submenu(menu_id),
+            MenuItemKind::Submenu(i) => i
+                .inner
+                .borrow_mut()
+                .create_ns_item_for_submenu(i.inner.clone(), menu_id),
             MenuItemKind::MenuItem(i) => i
                 .inner
                 .borrow_mut()
@@ -1037,6 +1049,29 @@ define_class!(
         #[unsafe(method(fireMenuItemAction:))]
         fn fire_menu_item_action(&self, _sender: Option<&AnyObject>) {
             self.fire_menu_item_click();
+        }
+
+        /// Checked submenu rows (screenpipe tray monitors): click toggles state;
+        /// hover still opens the preview flyout via AppKit's submenu behavior.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let toggle_submenu = self
+                .ivars()
+                .borrow()
+                .as_ref()
+                .map(|owner| {
+                    let item = owner.borrow();
+                    item.item_type == MenuItemType::Submenu
+                        && menu_extras::checked_submenu(&item.id.0).is_some()
+                })
+                .unwrap_or(false);
+
+            if toggle_submenu {
+                self.fire_menu_item_click();
+                return;
+            }
+
+            unsafe { msg_send![super(self), mouseDown: event] }
         }
     }
 );
@@ -1126,7 +1161,7 @@ impl MenuItem {
                 }
             }
         } else {
-            if item.item_type == MenuItemType::Check {
+            if item.item_type == MenuItemType::Check || item.item_type == MenuItemType::Submenu {
                 item.set_checked(!item.is_checked());
             }
 
@@ -1162,10 +1197,11 @@ impl MenuItem {
     }
 }
 
-fn menuitem_set_icon(menuitem: &NSMenuItem, icon: Option<&Icon>) {
+fn menuitem_set_icon(menuitem: &NSMenuItem, icon: Option<&Icon>, height: Option<f64>) {
     if let Some(icon) = icon {
         unsafe {
-            let nsimage = icon.inner.to_nsimage(Some(18.));
+            let size = height.unwrap_or(18.);
+            let nsimage = icon.inner.to_nsimage(Some(size));
             menuitem.setImage(Some(&nsimage));
         }
     } else {

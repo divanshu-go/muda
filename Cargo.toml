@@ -1,6 +1,6 @@
 [package]
 name = "muda"
-version = "0.19.2"
+version = "0.19.3"
 description = "Menu Utilities for Desktop Applications"
 edition = "2021"
 keywords = ["windowing", "menu"]
@@ -11,6 +11,8 @@ documentation = "https://docs.rs/muda"
 categories = ["gui"]
 rust-version = "1.73"
 include = ["README.md", "src/**/*.rs", "Cargo.toml", "LICENSE-APACHE", "LICENSE-MIT", "LICENSE.spdx"]
+
+[workspace]
 
 [features]
 default = ["libxdo", "gtk"]
